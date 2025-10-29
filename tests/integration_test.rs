@@ -1,26 +1,24 @@
 use std::collections::VecDeque;
-use repath::graph::Graph;
-use repath::settings::RePathSettings;
-use repath::utils::parse_obj;
+use repath::{RePathfinder, RePathSettingsBuilder};
 use dashmap::DashMap;
+use std::sync::Arc;
 
 #[test]
 fn test_pathfinding_connected_nodes() {
-    let settings = RePathSettings {
-        navmesh_filename: "NavMesh.obj".to_string(),
-        precompute_radius: 5000.0,
-        total_precompute_pairs: 100,
-        use_precomputed_cache: true,
-    };
+    // Use builder pattern with the correct navmesh file
+    let settings = RePathSettingsBuilder::new("navmesh_varied.obj")
+        .precompute_radius(100.0)
+        .total_precompute_pairs(100)
+        .build();
 
-    // Parse the navmesh file into a graph
-    let graph = parse_obj(&settings.navmesh_filename);
+    // Create pathfinder
+    let pathfinder = RePathfinder::new(settings).expect("Failed to create pathfinder");
 
-    // Initialize the cache using DashMap for concurrent access
-    let cache = DashMap::new();
+    // Get access to the graph for testing
+    let graph = &pathfinder.graph;
 
     // Find connected nodes
-    let (start_node_id, goal_node_id) = find_connected_nodes(&graph).expect("No connected nodes found");
+    let (start_node_id, goal_node_id) = find_connected_nodes(graph).expect("No connected nodes found");
 
     // Print node information for debugging
     println!(
@@ -32,14 +30,18 @@ fn test_pathfinding_connected_nodes() {
         goal_node_id, graph.nodes[goal_node_id]
     );
 
+    // Create cache and stats for A* call
+    let cache = DashMap::new();
+    let stats = Arc::new(repath::metrics::PathfindingStats::new());
+
     // Run the A* algorithm to find a path between the start and goal nodes
-    let path = graph.a_star(start_node_id, goal_node_id, &cache);
+    let path = graph.a_star(start_node_id, goal_node_id, &cache, &stats);
 
     // Assert that a path was found
     assert!(path.is_some(), "No path found between start and goal nodes");
 }
 
-fn find_connected_nodes(graph: &Graph) -> Option<(usize, usize)> {
+fn find_connected_nodes(graph: &repath::graph::Graph) -> Option<(usize, usize)> {
     for start_node_id in 0..graph.nodes.len() {
         for goal_node_id in (start_node_id + 1)..graph.nodes.len() {
             if are_nodes_connected(graph, start_node_id, goal_node_id) {
@@ -50,7 +52,7 @@ fn find_connected_nodes(graph: &Graph) -> Option<(usize, usize)> {
     None
 }
 
-fn are_nodes_connected(graph: &Graph, start: usize, goal: usize) -> bool {
+fn are_nodes_connected(graph: &repath::graph::Graph, start: usize, goal: usize) -> bool {
     let mut visited = vec![false; graph.nodes.len()];
     let mut queue = VecDeque::new();
     queue.push_back(start);

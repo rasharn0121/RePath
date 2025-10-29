@@ -1,12 +1,14 @@
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 
 use crate::graph::Graph;
-use crate::metrics::Metrics;
 use crate::node::Node;
+use crate::error::{RePathError, Result};
+use crate::metrics::StatsSnapshot;
 
-pub fn parse_obj(filename: &str) -> Graph {
-    let file = File::open(filename).expect("Unable to open file");
+pub fn parse_obj(filename: &str) -> Result<Graph> {
+    let file = File::open(filename)
+        .map_err(|e| RePathError::NavmeshLoadError(format!("{}: {}", filename, e)))?;
     let reader = BufReader::new(file);
 
     let mut graph = Graph::new();
@@ -14,7 +16,7 @@ pub fn parse_obj(filename: &str) -> Graph {
     let mut vertex_id = 0;
 
     for line in reader.lines() {
-        let line = line.expect("Unable to read line");
+        let line = line?;
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.is_empty() {
             continue;
@@ -22,17 +24,40 @@ pub fn parse_obj(filename: &str) -> Graph {
 
         match parts[0] {
             "v" => {
-                let x: f32 = parts[1].parse().unwrap();
-                let y: f32 = parts[2].parse().unwrap();
-                let z: f32 = parts[3].parse().unwrap();
+                let x: f32 = parts.get(1)
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| RePathError::ObjParseError("Invalid vertex X coordinate".to_string()))?;
+                let y: f32 = parts.get(2)
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| RePathError::ObjParseError("Invalid vertex Y coordinate".to_string()))?;
+                let z: f32 = parts.get(3)
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| RePathError::ObjParseError("Invalid vertex Z coordinate".to_string()))?;
                 vertices.push((x, y, z));
                 graph.add_node(Node::new(vertex_id, x, y, z));
                 vertex_id += 1;
             }
             "f" => {
-                let v1 = parts[1].parse::<usize>().unwrap() - 1;
-                let v2 = parts[2].parse::<usize>().unwrap() - 1;
-                let v3 = parts[3].parse::<usize>().unwrap() - 1;
+                let v1 = parts.get(1)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .ok_or_else(|| RePathError::ObjParseError("Invalid face vertex 1".to_string()))?
+                    .checked_sub(1)
+                    .ok_or_else(|| RePathError::ObjParseError("Face vertex index must be >= 1".to_string()))?;
+                let v2 = parts.get(2)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .ok_or_else(|| RePathError::ObjParseError("Invalid face vertex 2".to_string()))?
+                    .checked_sub(1)
+                    .ok_or_else(|| RePathError::ObjParseError("Face vertex index must be >= 1".to_string()))?;
+                let v3 = parts.get(3)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .ok_or_else(|| RePathError::ObjParseError("Invalid face vertex 3".to_string()))?
+                    .checked_sub(1)
+                    .ok_or_else(|| RePathError::ObjParseError("Face vertex index must be >= 1".to_string()))?;
+
+                if v1 >= vertices.len() || v2 >= vertices.len() || v3 >= vertices.len() {
+                    return Err(RePathError::ObjParseError("Face references invalid vertex".to_string()));
+                }
+
                 graph.add_edge(v1, v2, distance(&vertices[v1], &vertices[v2]));
                 graph.add_edge(v2, v3, distance(&vertices[v2], &vertices[v3]));
                 graph.add_edge(v3, v1, distance(&vertices[v3], &vertices[v1]));
@@ -41,7 +66,11 @@ pub fn parse_obj(filename: &str) -> Graph {
         }
     }
 
-    graph
+    if graph.nodes.is_empty() {
+        return Err(RePathError::NoNodesError);
+    }
+
+    Ok(graph)
 }
 
 pub fn distance(p1: &(f32, f32, f32), p2: &(f32, f32, f32)) -> f32 {
@@ -67,36 +96,48 @@ pub fn nodes_within_radius(graph: &Graph, node: &Node, radius: f32) -> Vec<usize
         .collect()
 }
 
-pub fn save_metrics_to_csv(
-    filename: &str,
-    metrics: &Metrics,
-) -> Result<(), Box<dyn std::error::Error>> {
+/// Save pathfinding metrics to a CSV file
+///
+/// If the file doesn't exist, it will be created with headers.
+/// If the file exists, data will be appended to it.
+///
+/// This is the primary way to export metrics for analysis.
+pub fn save_metrics_to_csv(filename: &str, stats: &StatsSnapshot) -> Result<()> {
     let file_exists = std::path::Path::new(filename).exists();
-    let mut wtr = csv::WriterBuilder::new()
-        .has_headers(!file_exists)
-        .from_writer(OpenOptions::new().create(true).append(true).open(filename)?);
 
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(filename)?;
+
+    // Write header if this is a new file
     if !file_exists {
-        wtr.write_record(&[
-            "navmesh_filename",
-            "use_precomputed_cache",
-            "precompute_radius",
-            "total_paths_precomputed",
-            "total_precompute_pairs",
-            "precomputation_time",
-            "pathfinding_time",
-        ])?;
+        writeln!(
+            file,
+            "total_requests,cache_hits,cache_misses,cache_hit_rate,early_exits_same_node,\
+            early_exits_adjacent,nodes_explored,avg_nodes_explored,total_computation_time_us,\
+            avg_computation_time_us,successful_paths,failed_paths,success_rate"
+        )?;
     }
 
-    wtr.write_record(&[
-        &metrics.settings.navmesh_filename,
-        &metrics.settings.use_precomputed_cache.to_string(),
-        &metrics.settings.precompute_radius.to_string(),
-        &metrics.total_paths_precomputed.to_string(),
-        &metrics.settings.total_precompute_pairs.to_string(),
-        &metrics.precomputation_time.to_string(),
-        &metrics.pathfinding_time.to_string(),
-    ])?;
-    wtr.flush()?;
+    // Write data row
+    writeln!(
+        file,
+        "{},{},{},{:.2},{},{},{},{:.2},{},{:.2},{},{},{:.2}",
+        stats.total_requests,
+        stats.cache_hits,
+        stats.cache_misses,
+        stats.cache_hit_rate(),
+        stats.early_exits_same_node,
+        stats.early_exits_adjacent,
+        stats.nodes_explored,
+        stats.avg_nodes_explored(),
+        stats.total_computation_time_us,
+        stats.avg_computation_time_us(),
+        stats.successful_paths,
+        stats.failed_paths,
+        stats.success_rate()
+    )?;
+
     Ok(())
 }

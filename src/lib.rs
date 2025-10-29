@@ -1,13 +1,22 @@
 pub mod node;
 pub mod edge;
 pub mod graph;
-pub mod metrics;
 mod path;
 pub mod pathfinder;
 pub mod settings;
 pub mod utils;
+pub mod error;
+pub mod metrics;
+pub mod smoothing;
+mod memory_pool;
+mod bidirectional;
 
 pub use pathfinder::RePathfinder;
+pub use error::{RePathError, Result};
+pub use settings::{RePathSettings, RePathSettingsBuilder};
+pub use metrics::{PathfindingStats, StatsSnapshot};
+pub use smoothing::{smooth_path, smooth_path_angle_based, smooth_path_combined};
+pub use utils::save_metrics_to_csv;
 
 #[cfg(test)]
 mod tests {
@@ -19,16 +28,22 @@ mod tests {
 
     #[test]
     fn test_pathfinding() {
+        // Initialize simple logger for tests
+        let _ = env_logger::builder().is_test(true).try_init();
+
         // Create a new RePathSettings instance with custom settings
         let settings = RePathSettings {
-            navmesh_filename: "NavMesh.obj".to_string(),
-            precompute_radius: 10000.0,
-            total_precompute_pairs: 5000,
+            navmesh_filename: "navmesh_varied.obj".to_string(),
+            precompute_radius: 100.0,
+            total_precompute_pairs: 500,
             use_precomputed_cache: true,
+            enable_path_smoothing: true,
+            smoothing_angle_threshold: 10.0,
+            use_bidirectional_search: false,
         };
 
         // Create a new RePathfinder instance
-        let pathfinder = RePathfinder::new(settings);
+        let pathfinder = RePathfinder::new(settings).expect("Failed to create pathfinder");
 
         // Optionally, print the graph bounds
         fn print_graph_bounds(graph: &Graph) {
@@ -98,7 +113,7 @@ mod tests {
 
         // Find path using a single thread
         let start_time = std::time::Instant::now();
-        let path1 = pathfinder.find_path(start_coords, end_coords);
+        let path1 = pathfinder.find_path(start_coords, end_coords).expect("Failed to find path");
         println!("Time to find path single-threaded: {:?}", start_time.elapsed());
         if let Some(path) = &path1 {
             println!("Path found with {} nodes.", path.len());
@@ -110,7 +125,8 @@ mod tests {
 
         // Find path using multiple threads
         let start_time = std::time::Instant::now();
-        let path2 = pathfinder.find_path_multithreaded(start_coords, end_coords, 4);
+        let path2 = pathfinder.find_path_multithreaded(start_coords, end_coords, 4)
+            .expect("Failed to find multithreaded path");
         println!("Time to find path multi-threaded: {:?}", start_time.elapsed());
 
         if let Some(path) = &path2 {
